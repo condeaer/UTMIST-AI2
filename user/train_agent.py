@@ -93,20 +93,28 @@ class RecurrentPPOAgent(Agent):
         if self.file_path is None:
             policy_kwargs = {
                 'activation_fn': nn.ReLU,
-                'lstm_hidden_size': 512,
-                'net_arch': [dict(pi=[32, 32], vf=[32, 32])],
+                'lstm_hidden_size': 256,  # smaller, faster, just as good
+                'net_arch': [dict(pi=[128, 128], vf=[128, 128])],
                 'shared_lstm': True,
                 'enable_critic_lstm': False,
                 'share_features_extractor': True,
-
             }
-            self.model = RecurrentPPO("MlpLstmPolicy",
-                                      self.env,
-                                      verbose=0,
-                                      n_steps=30*90*20,
-                                      batch_size=16,
-                                      ent_coef=0.05,
-                                      policy_kwargs=policy_kwargs)
+
+            self.model = RecurrentPPO(
+                "MlpLstmPolicy",
+                self.env,
+                learning_rate=3e-4,
+                n_steps=512,
+                batch_size=128,
+                ent_coef=0.005,
+                gamma=0.99,
+                gae_lambda=0.95,
+                clip_range=0.2,
+                vf_coef=0.5,
+                max_grad_norm=0.5,
+                policy_kwargs=policy_kwargs,
+                verbose=1,
+            )
             del self.env
         else:
             self.model = RecurrentPPO.load(self.file_path)
@@ -502,9 +510,15 @@ def holding_more_than_3_keys(
 
     # Apply penalty if the player is holding more than 3 keys
     a = player.cur_action
-    if (a > 0.5).sum() > 3:
-        return env.dt
-    return 0
+    num_pressed = (a > 0.5).sum()
+    return -env.dt * max(0, num_pressed - 3) * 0.5
+
+def falling_below_ground(env: WarehouseBrawl, fall_threshold: float = -2.0, penalty: float = 10.0) -> float:
+    """
+    Penalize player for falling below a certain vertical position (death zone).
+    """
+    player: Player = env.objects["player"]
+    return -penalty * env.dt if player.body.position.y < fall_threshold else 0.0
 
 def on_win_reward(env: WarehouseBrawl, agent: str) -> float:
     if agent == 'player':
@@ -543,22 +557,21 @@ Add your dictionary of RewardFunctions here using RewTerms
 '''
 def gen_reward_manager():
     reward_functions = {
-        #'target_height_reward': RewTerm(func=base_height_l2, weight=0.0, params={'target_height': -4, 'obj_name': 'player'}),
-        'danger_zone_reward': RewTerm(func=danger_zone_reward, weight=0.5),
-        'damage_interaction_reward': RewTerm(func=damage_interaction_reward, weight=1.0),
-        #'head_to_middle_reward': RewTerm(func=head_to_middle_reward, weight=0.01),
-        #'head_to_opponent': RewTerm(func=head_to_opponent, weight=0.05),
-        'penalize_attack_reward': RewTerm(func=in_state_reward, weight=-0.04, params={'desired_state': AttackState}),
+        'danger_zone_reward': RewTerm(func=danger_zone_reward, weight=1.0, params={'zone_penalty': 5}),
+        'damage_interaction_reward': RewTerm(func=damage_interaction_reward, weight=2.0),
+        'head_to_opponent': RewTerm(func=head_to_opponent, weight=0.05),
+        'penalize_attack_reward': RewTerm(func=in_state_reward, weight=-0.01, params={'desired_state': AttackState}),
         'holding_more_than_3_keys': RewTerm(func=holding_more_than_3_keys, weight=-0.01),
-        #'taunt_reward': RewTerm(func=in_state_reward, weight=0.2, params={'desired_state': TauntState}),
+        'falling_below_ground': RewTerm(func=falling_below_ground, weight=1.0),
     }
     signal_subscriptions = {
-        'on_win_reward': ('win_signal', RewTerm(func=on_win_reward, weight=50)),
-        'on_knockout_reward': ('knockout_signal', RewTerm(func=on_knockout_reward, weight=8)),
-        'on_combo_reward': ('hit_during_stun', RewTerm(func=on_combo_reward, weight=5)),
-        'on_equip_reward': ('weapon_equip_signal', RewTerm(func=on_equip_reward, weight=10)),
-        'on_drop_reward': ('weapon_drop_signal', RewTerm(func=on_drop_reward, weight=15))
+    'on_win_reward': ('win_signal', RewTerm(func=on_win_reward, weight=100)),
+    'on_knockout_reward': ('knockout_signal', RewTerm(func=on_knockout_reward, weight=20)),
+    'on_combo_reward': ('hit_during_stun', RewTerm(func=on_combo_reward, weight=10)),
+    'on_equip_reward': ('weapon_equip_signal', RewTerm(func=on_equip_reward, weight=10)),
+    'on_drop_reward': ('weapon_drop_signal', RewTerm(func=on_drop_reward, weight=5)),
     }
+
     return RewardManager(reward_functions, signal_subscriptions)
 
 # -------------------------------------------------------------------------
@@ -569,13 +582,13 @@ The main function runs training. You can change configurations such as the Agent
 '''
 if __name__ == '__main__':
     # Create agent
-    my_agent = CustomAgent(sb3_class=PPO, extractor=MLPExtractor)
+    # my_agent = CustomAgent(sb3_class=PPO, extractor=MLPExtractor)
 
     # Start here if you want to train from scratch. e.g:
-    #my_agent = RecurrentPPOAgent()
+    # my_agent = RecurrentPPOAgent()
 
     # Start here if you want to train from a specific timestep. e.g:
-    #my_agent = RecurrentPPOAgent(file_path='checkpoints/experiment_3/rl_model_120006_steps.zip')
+    my_agent = RecurrentPPOAgent(file_path='checkpoints/experiment_11/rl_model_2900904_steps.zip')
 
     # Reward manager
     reward_manager = gen_reward_manager()
@@ -591,15 +604,15 @@ if __name__ == '__main__':
         save_freq=100_000, # Save frequency
         max_saved=40, # Maximum number of saved models
         save_path='checkpoints', # Save path
-        run_name='experiment_9',
-        mode=SaveHandlerMode.FORCE # Save mode, FORCE or RESUME
+        run_name='experiment_11',
+        mode=SaveHandlerMode.RESUME # Save mode, FORCE or RESUME
     )
 
     # Set opponent settings here:
     opponent_specification = {
-                    'self_play': (8, selfplay_handler),
-                    'constant_agent': (0.5, partial(ConstantAgent)),
-                    'based_agent': (1.5, partial(BasedAgent)),
+                    # 'self_play': (8, selfplay_handler),
+                    'constant_agent': (2.5, partial(ConstantAgent)),
+                    'based_agent': (8, partial(BasedAgent)),
                 }
     opponent_cfg = OpponentsCfg(opponents=opponent_specification)
 
@@ -608,6 +621,6 @@ if __name__ == '__main__':
         save_handler,
         opponent_cfg,
         CameraResolution.LOW,
-        train_timesteps=1_000_000_000,
+        train_timesteps=1_000_000,
         train_logging=TrainLogging.PLOT
     )
